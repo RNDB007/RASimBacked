@@ -136,7 +136,7 @@ void RASimServerManager::destroyServer(const QString& uniqueSceneKey) {
         QDir dir(tempPath);
         if (dir.exists()) {
             dir.removeRecursively();
-            qDebug() << "Deleted temp directory:" << tempPath;
+            qDebug() << "Deleted temp directory:" << tempPath;  
         }
     }
 }

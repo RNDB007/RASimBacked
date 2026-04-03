@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QSet>
+#include <QMap>
 
 /**
  * @brief 将 stScenario JSON 转换为 AFSIM 想定 txt 格式
@@ -13,6 +14,20 @@
  */
 class ScenarioConverter
 {
+public:
+    // 解析后的航线点
+    struct RouteWaypoint {
+        double lon;   // 经度
+        double lat;   // 纬度
+        double alt;   // 高度(m)
+    };
+
+    // 解析后的定速航线指令
+    struct ParsedRouteOrder {
+        double speedMs;                    // 速度 m/s
+        QVector<RouteWaypoint> waypoints;  // 航线点列表
+    };
+
 public:
     /**
      * @brief 校验 scenario JSON 是否包含必要字段
@@ -42,9 +57,15 @@ private:
     static QString formatPosition(double lon, double lat, double altM);
     /// m/s → knots 字符串
     static QString formatSpeed(double speedMs);
+    /// 判断两个航路点是否重合（经纬度差<0.00001度，高度差<1米）
+    static bool isCoincident(double lon1, double lat1, double alt1,
+                             double lon2, double lat2, double alt2);
 
     // ---- 时间计算 ----
     static double calcEndTimeSec(const QString& start, const QString& end);
+
+    // ---- 延时指令解析 ----
+    static QMap<QString, ParsedRouteOrder> parsePendingOrders(const QJsonObject& json);
 
     // ---- 子块生成 ----
     static QString genPlatformType(const QString& typeName, int typeId, bool isStatic);
@@ -56,7 +77,8 @@ private:
                                double heading, double speedMs,
                                bool isStatic,
                                double endSec,
-                               const QJsonObject& payloads);
+                               const QJsonObject& payloads,
+                               const QMap<QString, ParsedRouteOrder>& routeOrders);
     static QString genZone(const QString& name, const QJsonObject& area);
     static QString genPayloads(const QJsonObject& payloads);
 

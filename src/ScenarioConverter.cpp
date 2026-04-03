@@ -1,4 +1,4 @@
-#include "ScenarioConverter.h"
+﻿#include "ScenarioConverter.h"
 #include <QDateTime>
 #include <QMath.h>
 #include <QDebug>
@@ -6,6 +6,12 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// 分隔符常量 (与 RA_BASIC ra_order.h 一致)
+static const char* SEP_L1 = "|";   // 指令头与数据分隔
+static const char* SEP_L2 = "`";   // 速度与航线点分隔
+static const char* SEP_L3 = "~";   // 航线点之间分隔
+static const char* SEP_L4 = "$";   // 经度/纬度/高度分隔
 
 static const double MS_TO_KTS = 1.94384;
 static const double DEG_TO_RAD = M_PI / 180.0;
@@ -72,7 +78,7 @@ QString ScenarioConverter::convertToAfsimTxt(const QJsonObject& json)
         ts << "# 描述: " << desc << "\n";
     ts << "\n";
 
-    ts << "frame_time 0.01 seconds\n\n";
+    ts << "frame_time 0.016 seconds\n\n";
 
     // ---- 计算仿真时长 ----
     QString strStart = json["strStartTime"].toString();
@@ -117,6 +123,10 @@ QString ScenarioConverter::convertToAfsimTxt(const QJsonObject& json)
 
     // ---- 生成平台实例 ----
     ts << "# ---- 平台实例 ----\n\n";
+
+    // 解析延时指令，构建平台ID->航线数据映射
+    QMap<QString, ParsedRouteOrder> routeOrders = parsePendingOrders(json);
+
     for (const QJsonValue& tv : teams) {
         QJsonObject team = tv.toObject();
         QJsonObject manner = team["tObjManner"].toObject();
@@ -145,7 +155,7 @@ QString ScenarioConverter::convertToAfsimTxt(const QJsonObject& json)
 
         ts << genPlatform(teamId, typeName, side, cat,
                           lon, lat, alt, heading, speed,
-                          isStatic, endSec, payloads);
+                          isStatic, endSec, payloads, routeOrders);
 
         // ---- 编队成员 ----
         QJsonArray members = team["vecTeamInfo"].toArray();
@@ -174,7 +184,7 @@ QString ScenarioConverter::convertToAfsimTxt(const QJsonObject& json)
 
             ts << genPlatform(memberId, mTypeName, mSide, mCat,
                               mLon, mLat, mAlt, heading, speed,
-                              isStatic, endSec, mPayloads);
+                              isStatic, endSec, mPayloads, routeOrders);
         }
     }
 
@@ -294,6 +304,16 @@ QString ScenarioConverter::formatSpeed(double speedMs)
     return QString::number(qFabs(kts), 'f', 1) + " kts";
 }
 
+bool ScenarioConverter::isCoincident(double lon1, double lat1, double alt1,
+                                     double lon2, double lat2, double alt2)
+{
+    static const double POS_EPS = 1e-5;  // ~1.1m
+    static const double ALT_EPS = 1.0;   // 1m
+    return qFabs(lon1 - lon2) < POS_EPS &&
+           qFabs(lat1 - lat2) < POS_EPS &&
+           qFabs(alt1 - alt2) < ALT_EPS;
+}
+
 // ============================================================================
 // 时间计算
 // ============================================================================
@@ -340,7 +360,8 @@ QString ScenarioConverter::genPlatform(const QString& instanceName,
                                        double heading, double speedMs,
                                        bool isStatic,
                                        double endSec,
-                                       const QJsonObject& payloads)
+                                       const QJsonObject& payloads,
+                                       const QMap<QString, ParsedRouteOrder>& routeOrders)
 {
     QString out;
     QTextStream ts(&out);
@@ -351,10 +372,31 @@ QString ScenarioConverter::genPlatform(const QString& instanceName,
     ts << "   " << formatPosition(lon, lat, altM) << "\n";
     ts << "   heading " << QString::number(heading, 'f', 1) << " deg\n";
 
-    // 活动平台生成简单两点航路
-    if (!isStatic && speedMs > 0.1) {
-        double kts = speedMs * MS_TO_KTS;
-        // 沿航向投影一个点作为航路终点
+    // 航路生成：优先使用 vecPendingOrder 中的航线，否则回退到简单两点航路
+    auto orderIt = routeOrders.find(instanceName);
+    if (!isStatic && orderIt != routeOrders.end() && !orderIt->waypoints.isEmpty()) {
+        // 使用 vecPendingOrder 中的多点航线，跳过连续重复的航路点
+        // AFSIM 会将平台初始化到 route 的第一个航路点，所以必须以平台 position 为锚点
+        const ParsedRouteOrder& order = orderIt.value();
+        QVector<RouteWaypoint> filtered;
+        RouteWaypoint startPos{lon, lat, altM};
+        filtered.append(startPos);
+        for (const RouteWaypoint& wp : order.waypoints) {
+            if (isCoincident(wp.lon, wp.lat, wp.alt,
+                             filtered.last().lon, filtered.last().lat, filtered.last().alt))
+                continue;
+            filtered.append(wp);
+        }
+        if (!filtered.isEmpty()) {
+            ts << "   route\n";
+            for (const RouteWaypoint& wp : filtered) {
+                ts << "      " << formatPosition(wp.lon, wp.lat, wp.alt)
+                   << " speed " << formatSpeed(order.speedMs) << "\n";
+            }
+            ts << "   end_route\n";
+        }
+    } else if (!isStatic && speedMs > 0.1) {
+        // 回退：沿航向投影一个点作为航路终点
         double hdgRad = heading * DEG_TO_RAD;
         double distM = speedMs * endSec;
         // 限制最大距离为 500km 以保持合理
@@ -499,4 +541,68 @@ void ScenarioConverter::calcMemberPosition(double leaderLon, double leaderLat, d
     outLat = leaderLat + deltaLat;
     outLon = leaderLon + deltaLon;
     outAlt = leaderAlt + relAlt;
+}
+
+// ============================================================================
+// 延时指令解析
+// ============================================================================
+
+QMap<QString, ScenarioConverter::ParsedRouteOrder>
+ScenarioConverter::parsePendingOrders(const QJsonObject& json)
+{
+    QMap<QString, ParsedRouteOrder> result;
+
+    QJsonArray orders = json["vecPendingOrder"].toArray();
+    if (orders.isEmpty()) return result;
+
+    for (const QJsonValue& ov : orders) {
+        QString orderStr = ov.toString();
+        if (orderStr.isEmpty()) continue;
+
+        // 指令头 | 航线数据
+        QStringList level1 = orderStr.split(SEP_L1);
+        if (level1.size() < 2) continue;
+
+        // 解析指令头: 定速航线,平台ID,...
+        QStringList header = level1[0].split(",");
+        if (header.size() < 2) continue;
+
+        QString orderType = header[0].trimmed();
+        QString platformId = header[1].trimmed();
+
+        // 目前只处理 "定速航线"
+        if (orderType != QStringLiteral("定速航线")) continue;
+
+        // 航线数据: 速度`航线点1~航线点2~...
+        QStringList level2 = level1[1].split(SEP_L2);
+        if (level2.size() < 2) continue;
+
+        double speedMs = level2[0].trimmed().toDouble();
+        if (speedMs <= 0.0) continue;
+
+        QString waypointsStr = level2[1];
+        QStringList pointStrs = waypointsStr.split(SEP_L3);
+
+        ParsedRouteOrder order;
+        order.speedMs = speedMs;
+
+        for (const QString& ptStr : pointStrs) {
+            QString trimmed = ptStr.trimmed();
+            if (trimmed.isEmpty()) continue;
+            QStringList coords = trimmed.split(SEP_L4);
+            if (coords.size() < 3) continue;
+
+            RouteWaypoint wp;
+            wp.lon = coords[0].toDouble();
+            wp.lat = coords[1].toDouble();
+            wp.alt = coords[2].toDouble();
+            order.waypoints.append(wp);
+        }
+
+        if (order.waypoints.size() >= 2) {
+            result[platformId] = order;
+        }
+    }
+
+    return result;
 }

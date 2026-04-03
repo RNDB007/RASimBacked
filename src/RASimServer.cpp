@@ -9,7 +9,7 @@
 #include "WsfLocalTrack.hpp"
 #include "qjsonobject.h"
 #include "qjsonarray.h"
-
+#include "qdebug.h"
 // ========== RASimServer 实现 ==========
 RASimServer::RASimServer(const QString& sceneFile, QObject* parent)
     : QObject(parent)
