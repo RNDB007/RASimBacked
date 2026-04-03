@@ -1,0 +1,10 @@
+# 忽略所有
+*
+!.gitignore
+
+# 不忽略 src 目录
+!src/
+!src/**
+
+# 不忽略 CMakeLists.txt
+!CMakeLists.txt
