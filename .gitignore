@@ -8,3 +8,6 @@
 
 # 不忽略 CMakeLists.txt
 !CMakeLists.txt
+
+# 不忽略 README.md
+!README.md
